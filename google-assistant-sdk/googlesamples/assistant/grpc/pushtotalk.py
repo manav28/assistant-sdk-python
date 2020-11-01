@@ -23,6 +23,8 @@ import pathlib2 as pathlib
 import sys
 import time
 import uuid
+import subprocess
+import re
 
 import click
 import grpc
@@ -135,23 +137,17 @@ class SampleAssistant(object):
 
         # This generator yields AssistResponse proto messages
         # received from the gRPC Google Assistant API.
+        response = None
         for resp in self.assistant.Assist(iter_log_assist_requests(),
                                           self.deadline):
+            if resp.speech_results:
+                response = resp.speech_results[-1]
             assistant_helpers.log_assist_response_without_audio(resp)
             if resp.event_type == END_OF_UTTERANCE:
                 logging.info('End of audio request detected.')
                 logging.info('Stopping recording.')
                 self.conversation_stream.stop_recording()
-            if resp.speech_results:
-                logging.info('Transcript of user request: "%s".',
-                             ' '.join(r.transcript
-                                      for r in resp.speech_results))
-            if len(resp.audio_out.audio_data) > 0:
-                if not self.conversation_stream.playing:
-                    self.conversation_stream.stop_recording()
-                    self.conversation_stream.start_playback()
-                    logging.info('Playing assistant response.')
-                self.conversation_stream.write(resp.audio_out.audio_data)
+            
             if resp.dialog_state_out.conversation_state:
                 conversation_state = resp.dialog_state_out.conversation_state
                 logging.debug('Updating conversation state.')
@@ -175,12 +171,17 @@ class SampleAssistant(object):
             if self.display and resp.screen_out.data:
                 system_browser = browser_helpers.system_browser
                 system_browser.display(resp.screen_out.data)
+        
+        if response:
+            command = str(response)
+            command = re.findall('"(.*)"', command)[0]
+            logging.info(f'Command issued is {command}')
+            subprocess.run(['/bin/bash', '-i', '-c', command])
 
         if len(device_actions_futures):
             logging.info('Waiting for device executions to complete.')
             concurrent.futures.wait(device_actions_futures)
 
-        logging.info('Finished playing assistant response.')
         self.conversation_stream.stop_playback()
         return continue_conversation
 
@@ -454,7 +455,11 @@ def main(api_endpoint, credentials, project_id,
         wait_for_user_trigger = not once
         while True:
             if wait_for_user_trigger:
-                click.pause(info='Press Enter to send a new request...')
+                click.prompt(text='Press Enter to issue a command or Ctrl+C to exit...',
+                             default='\n',
+                             hide_input=True,
+                             show_default=False,
+                             prompt_suffix='')
             continue_conversation = assistant.assist()
             # wait for user trigger if there is no follow-up turn in
             # the conversation.
